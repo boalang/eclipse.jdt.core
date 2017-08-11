@@ -999,6 +999,32 @@ public class ASTParser {
 			initializeDefaults();
 		}
 	}
+	public void createASTs(Map<String, String> contents, String[] sourceFilePaths, String[] encodings, String[] bindingKeys,
+			FileASTRequestor requestor, IProgressMonitor monitor) {
+		try {
+			int flags = 0;
+			if ((this.bits & CompilationUnitResolver.STATEMENT_RECOVERY) != 0) {
+				flags |= ICompilationUnit.ENABLE_STATEMENTS_RECOVERY;
+			}
+			if ((this.bits & CompilationUnitResolver.IGNORE_METHOD_BODIES) != 0) {
+				flags |= ICompilationUnit.IGNORE_METHOD_BODIES;
+			}
+			if ((this.bits & CompilationUnitResolver.RESOLVE_BINDING) != 0) {
+				if (this.classpaths == null && this.sourcepaths == null && ((this.bits & CompilationUnitResolver.INCLUDE_RUNNING_VM_BOOTCLASSPATH) == 0)) {
+					throw new IllegalStateException("no environment is specified"); //$NON-NLS-1$
+				}
+				if ((this.bits & CompilationUnitResolver.BINDING_RECOVERY) != 0) {
+					flags |= ICompilationUnit.ENABLE_BINDINGS_RECOVERY;
+				}
+				CompilationUnitResolver.resolve(contents, sourceFilePaths, encodings, bindingKeys, requestor, this.apiLevel, this.compilerOptions, getClasspath(), flags, monitor);
+			} else {
+				CompilationUnitResolver.parse(contents, sourceFilePaths, encodings, requestor, this.apiLevel, this.compilerOptions, flags, monitor);
+			}
+		} finally {
+			// reset to defaults to allow reuse (and avoid leaking)
+			initializeDefaults();
+		}
+	}
 	/**
 	 * Creates bindings for a batch of Java elements.
 	 * 

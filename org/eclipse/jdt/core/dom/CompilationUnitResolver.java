@@ -166,6 +166,7 @@ class CompilationUnitResolver extends Compiler {
 	/*
 	 * Add additional source types
 	 */
+	@Override
 	public void accept(ISourceType[] sourceTypes, PackageBinding packageBinding, AccessRestriction accessRestriction) {
 		// Need to reparse the entire source of the compilation unit so as to get source positions
 		// (case of processing a source that was not known by beginToCompile (e.g. when asking to createBinding))
@@ -173,6 +174,7 @@ class CompilationUnitResolver extends Compiler {
 		accept((org.eclipse.jdt.internal.compiler.env.ICompilationUnit) sourceType.getHandle().getCompilationUnit(), accessRestriction);
 	}
 	
+	@Override
 	public synchronized void accept(org.eclipse.jdt.internal.compiler.env.ICompilationUnit sourceUnit, AccessRestriction accessRestriction) {
 		super.accept(sourceUnit, accessRestriction);
 	}
@@ -315,12 +317,15 @@ class CompilationUnitResolver extends Compiler {
 
 		// passes the initial set of files to the batch oracle (to avoid finding more than once the same units when case insensitive match)
 		return new IErrorHandlingPolicy() {
+			@Override
 			public boolean stopOnFirstError() {
 				return false;
 			}
+			@Override
 			public boolean proceedOnErrors() {
 				return false; // stop if there are some errors
 			}
+			@Override
 			public boolean ignoreAllErrors() {
 				return false;
 			}
@@ -332,6 +337,7 @@ class CompilationUnitResolver extends Compiler {
 	 */
 	protected static ICompilerRequestor getRequestor() {
 		return new ICompilerRequestor() {
+			@Override
 			public void acceptResult(CompilationResult compilationResult) {
 				// do nothing
 			}
@@ -341,9 +347,11 @@ class CompilationUnitResolver extends Compiler {
 	/* (non-Javadoc)
 	 * @see org.eclipse.jdt.internal.compiler.Compiler#initializeParser()
 	 */
+	@Override
 	public void initializeParser() {
 		this.parser = new CommentRecorderParser(this.problemReporter, false);
 	}
+	@Override
 	public void process(CompilationUnitDeclaration unit, int i) {
 		// don't resolve a second time the same unit (this would create the same binding twice)
 		char[] fileName = unit.compilationResult.getFileName();
@@ -353,6 +361,7 @@ class CompilationUnitResolver extends Compiler {
 	/*
 	 * Compiler crash recovery in case of unexpected runtime exceptions
 	 */
+	@Override
 	protected void handleInternalException(
 			Throwable internalException,
 			CompilationUnitDeclaration unit,
@@ -366,6 +375,7 @@ class CompilationUnitResolver extends Compiler {
 	/*
 	 * Compiler recovery in case of internal AbortCompilation event
 	 */
+	@Override
 	protected void handleInternalException(
 			AbortCompilation abortException,
 			CompilationUnitDeclaration unit) {
@@ -450,6 +460,66 @@ class CompilationUnitResolver extends Compiler {
 					// go to the next unit
 					continue;
 				}
+				if (contents == null) {
+					// go to the next unit
+					continue;
+				}
+				org.eclipse.jdt.internal.compiler.batch.CompilationUnit compilationUnit = new org.eclipse.jdt.internal.compiler.batch.CompilationUnit(contents, sourceUnits[i], encoding);
+				org.eclipse.jdt.internal.compiler.env.ICompilationUnit sourceUnit = compilationUnit;
+				CompilationResult compilationResult = new CompilationResult(sourceUnit, 0, 0, compilerOptions.maxProblemsPerUnit);
+				CompilationUnitDeclaration compilationUnitDeclaration = parser.dietParse(sourceUnit, compilationResult);
+
+				if (compilationUnitDeclaration.ignoreMethodBodies) {
+					compilationUnitDeclaration.ignoreFurtherInvestigation = true;
+					// if initial diet parse did not work, no need to dig into method bodies.
+					continue;
+				}
+
+				//fill the methods bodies in order for the code to be generated
+				//real parse of the method....
+				org.eclipse.jdt.internal.compiler.ast.TypeDeclaration[] types = compilationUnitDeclaration.types;
+				if (types != null) {
+					for (int j = 0, typeLength = types.length; j < typeLength; j++) {
+						types[j].parseMethods(parser, compilationUnitDeclaration);
+					}
+				}
+
+				// convert AST
+				CompilationUnit node = convert(compilationUnitDeclaration, parser.scanner.getSource(), apiLevel, options, false/*don't resolve binding*/, null/*no owner needed*/, null/*no binding table needed*/, flags /* flags */, monitor, true);
+				node.setTypeRoot(null);
+
+				// accept AST
+				astRequestor.acceptAST(sourceUnits[i], node);
+
+				if (monitor != null) monitor.worked(1);
+			}
+		} finally {
+			if (monitor != null) monitor.done();
+		}
+	}
+	public static void parse(
+			Map<String, String> sourceContents,
+			String[] sourceUnits,
+			String[] encodings,
+			FileASTRequestor astRequestor,
+			int apiLevel,
+			Map options,
+			int flags,
+			IProgressMonitor monitor) {
+		try {
+			CompilerOptions compilerOptions = new CompilerOptions(options);
+			compilerOptions.ignoreMethodBodies = (flags & ICompilationUnit.IGNORE_METHOD_BODIES) != 0;
+			Parser parser = new CommentRecorderParser(
+				new ProblemReporter(
+						DefaultErrorHandlingPolicies.proceedWithAllProblems(),
+						compilerOptions,
+						new DefaultProblemFactory()),
+				false);
+			int unitLength = sourceUnits.length;
+			if (monitor != null) monitor.beginTask("", unitLength); //$NON-NLS-1$
+			for (int i = 0; i < unitLength; i++) {
+				char[] contents = sourceContents.get(sourceUnits[i]).toCharArray();
+				String encoding = encodings != null ? encodings[i] : null;
 				if (contents == null) {
 					// go to the next unit
 					continue;
@@ -652,6 +722,56 @@ class CompilationUnitResolver extends Compiler {
 				}
 			}
 		}
+	public static void resolve(
+			Map<String, String> sourceContents,
+			String[] sourceUnits,
+			String[] encodings,
+			String[] bindingKeys,
+			FileASTRequestor requestor,
+			int apiLevel,
+			Map options,
+			List classpaths,
+			int flags,
+			IProgressMonitor monitor) {
+
+			INameEnvironmentWithProgress environment = null;
+			CancelableProblemFactory problemFactory = null;
+			try {
+				if (monitor != null) {
+					int amountOfWork = (sourceUnits.length + bindingKeys.length) * 2; // 1 for beginToCompile, 1 for resolve
+					monitor.beginTask("", amountOfWork); //$NON-NLS-1$
+				}
+				Classpath[] allEntries = new Classpath[classpaths.size()];
+				classpaths.toArray(allEntries);
+				environment = new NameEnvironmentWithProgress(allEntries, null, monitor);
+				problemFactory = new CancelableProblemFactory(monitor);
+				CompilerOptions compilerOptions = getCompilerOptions(options, (flags & ICompilationUnit.ENABLE_STATEMENTS_RECOVERY) != 0);
+				compilerOptions.ignoreMethodBodies = (flags & ICompilationUnit.IGNORE_METHOD_BODIES) != 0;
+				CompilationUnitResolver resolver =
+					new CompilationUnitResolver(
+						environment,
+						getHandlingPolicy(),
+						compilerOptions,
+						getRequestor(),
+						problemFactory,
+						monitor,
+						false);
+				resolver.resolve(sourceContents, sourceUnits, encodings, bindingKeys, requestor, apiLevel, options, flags);
+				if (NameLookup.VERBOSE && (environment instanceof CancelableNameEnvironment)) {
+					CancelableNameEnvironment cancelableNameEnvironment = (CancelableNameEnvironment) environment;
+					System.out.println(Thread.currentThread() + " TIME SPENT in NameLoopkup#seekTypesInSourcePackage: " + cancelableNameEnvironment.nameLookup.timeSpentInSeekTypesInSourcePackage + "ms");  //$NON-NLS-1$ //$NON-NLS-2$
+					System.out.println(Thread.currentThread() + " TIME SPENT in NameLoopkup#seekTypesInBinaryPackage: " + cancelableNameEnvironment.nameLookup.timeSpentInSeekTypesInBinaryPackage + "ms");  //$NON-NLS-1$ //$NON-NLS-2$
+				}
+			} finally {
+				if (monitor != null) monitor.done();
+				if (environment != null) {
+					environment.setMonitor(null); // don't hold a reference to this external object
+				}
+				if (problemFactory != null) {
+					problemFactory.monitor = null; // don't hold a reference to this external object
+				}
+			}
+		}
 	public static CompilationUnitDeclaration resolve(
 			org.eclipse.jdt.internal.compiler.env.ICompilationUnit sourceUnit,
 			IJavaProject javaProject,
@@ -782,6 +902,7 @@ class CompilationUnitResolver extends Compiler {
 
 		class Requestor extends ASTRequestor {
 			IBinding[] bindings = new IBinding[length];
+			@Override
 			public void acceptAST(ICompilationUnit source, CompilationUnit ast) {
 				// TODO (jerome) optimize to visit the AST only once
 				IntArrayList intList = (IntArrayList) sourceElementPositions.get(source);
@@ -797,6 +918,7 @@ class CompilationUnitResolver extends Compiler {
 					this.bindings[index] = finder.foundBinding;
 				}
 			}
+			@Override
 			public void acceptBinding(String bindingKey, IBinding binding) {
 				int index = binaryElementPositions.get(bindingKey);
 				this.bindings[index] = binding;
@@ -1098,6 +1220,134 @@ class CompilationUnitResolver extends Compiler {
 		}
 	}
 
+	private void resolve(
+			Map<String, String> sourceContents,
+			String[] sourceCompilationUnits,
+			String[] encodings,
+			String[] bindingKeys,
+			FileASTRequestor astRequestor,
+			int apiLevel,
+			Map compilerOptions,
+			int flags) {
+
+		// temporarily connect ourselves to the ASTResolver - must disconnect when done
+		astRequestor.compilationUnitResolver = this;
+		this.bindingTables = new DefaultBindingResolver.BindingTables();
+		CompilationUnitDeclaration unit = null;
+		try {
+			int length = sourceCompilationUnits.length;
+			org.eclipse.jdt.internal.compiler.env.ICompilationUnit[] sourceUnits = new org.eclipse.jdt.internal.compiler.env.ICompilationUnit[length];
+			int count = 0;
+			for (int i = 0; i < length; i++) {
+				String encoding = encodings != null ? encodings[i] : null;
+				String sourceUnitPath = sourceCompilationUnits[i];
+				char[] contents = sourceContents.get(sourceUnitPath).toCharArray();
+				if (contents == null) {
+					// go to the next unit
+					continue;
+				}
+				sourceUnits[count++] = new org.eclipse.jdt.internal.compiler.batch.CompilationUnit(contents, sourceUnitPath, encoding);
+			}
+			beginToCompile(sourceUnits, bindingKeys);
+			// process all units (some more could be injected in the loop by the lookup environment)
+			for (int i = 0; i < this.totalUnits; i++) {
+				if (resolvedRequestedSourcesAndKeys(i)) {
+					// no need to keep resolving if no more ASTs and no more binding keys are needed
+					// see https://bugs.eclipse.org/bugs/show_bug.cgi?id=114935
+					// cleanup remaining units
+					for (; i < this.totalUnits; i++) {
+						this.unitsToProcess[i].cleanUp();
+						this.unitsToProcess[i] = null;
+					}
+					break;
+				}
+				unit = this.unitsToProcess[i];
+				try {
+					super.process(unit, i); // this.process(...) is optimized to not process already known units
+
+					// requested AST
+					char[] fileName = unit.compilationResult.getFileName();
+					org.eclipse.jdt.internal.compiler.env.ICompilationUnit source = (org.eclipse.jdt.internal.compiler.env.ICompilationUnit) this.requestedSources.get(fileName);
+					if (source != null) {
+						// convert AST
+						CompilationResult compilationResult = unit.compilationResult;
+						org.eclipse.jdt.internal.compiler.env.ICompilationUnit sourceUnit = compilationResult.compilationUnit;
+						char[] contents = sourceUnit.getContents();
+						AST ast = AST.newAST(apiLevel);
+						ast.setFlag(flags | AST.RESOLVED_BINDINGS);
+						ast.setDefaultNodeFlag(ASTNode.ORIGINAL);
+						ASTConverter converter = new ASTConverter(compilerOptions, true/*need to resolve bindings*/, this.monitor);
+						BindingResolver resolver = new DefaultBindingResolver(unit.scope, null, this.bindingTables, (flags & ICompilationUnit.ENABLE_BINDINGS_RECOVERY) != 0, this.fromJavaProject);
+						ast.setBindingResolver(resolver);
+						converter.setAST(ast);
+						CompilationUnit compilationUnit = converter.convert(unit, contents);
+						compilationUnit.setTypeRoot(null);
+						compilationUnit.setLineEndTable(compilationResult.getLineSeparatorPositions());
+						ast.setDefaultNodeFlag(0);
+						ast.setOriginalModificationCount(ast.modificationCount());
+
+						// pass it to requestor
+						astRequestor.acceptAST(new String(source.getFileName()), compilationUnit);
+
+						worked(1);
+
+						// remove at the end so that we don't resolve twice if a source and a key for the same file name have been requested
+						this.requestedSources.put(fileName, null); // mark it as removed
+					}
+
+					// requested binding
+					Object key = this.requestedKeys.get(fileName);
+					if (key != null) {
+						if (key instanceof BindingKeyResolver) {
+							reportBinding(key, astRequestor, unit);
+							worked(1);
+						} else if (key instanceof ArrayList) {
+							Iterator iterator = ((ArrayList) key).iterator();
+							while (iterator.hasNext()) {
+								reportBinding(iterator.next(), astRequestor, unit);
+								worked(1);
+							}
+						}
+
+						// remove at the end so that we don't resolve twice if a source and a key for the same file name have been requested
+						this.requestedKeys.put(fileName, null); // mark it as removed
+					}
+				} finally {
+					// cleanup compilation unit result
+					unit.cleanUp();
+				}
+				this.unitsToProcess[i] = null; // release reference to processed unit declaration
+				this.requestor.acceptResult(unit.compilationResult.tagAsAccepted());
+			}
+
+			// remaining binding keys
+			DefaultBindingResolver resolver = new DefaultBindingResolver(this.lookupEnvironment, null, this.bindingTables, (flags & ICompilationUnit.ENABLE_BINDINGS_RECOVERY) != 0, true);
+			Object[] keys = this.requestedKeys.valueTable;
+			for (int j = 0, keysLength = keys.length; j < keysLength; j++) {
+				BindingKeyResolver keyResolver = (BindingKeyResolver) keys[j];
+				if (keyResolver == null) continue;
+				Binding compilerBinding = keyResolver.getCompilerBinding();
+				IBinding binding = compilerBinding == null ? null : resolver.getBinding(compilerBinding);
+				// pass it to requestor
+				astRequestor.acceptBinding(((BindingKeyResolver) this.requestedKeys.valueTable[j]).getKey(), binding);
+				worked(1);
+			}
+		} catch (OperationCanceledException e) {
+			throw e;
+		} catch (AbortCompilation e) {
+			this.handleInternalException(e, unit);
+		} catch (Error e) {
+			this.handleInternalException(e, unit, null);
+			throw e; // rethrow
+		} catch (RuntimeException e) {
+			this.handleInternalException(e, unit, null);
+			throw e; // rethrow
+		} finally {
+			// disconnect ourselves from ast requestor
+			astRequestor.compilationUnitResolver = null;
+		}
+	}
+
 	private void reportBinding(Object key, ASTRequestor astRequestor, WorkingCopyOwner owner, CompilationUnitDeclaration unit) {
 		BindingKeyResolver keyResolver = (BindingKeyResolver) key;
 		Binding compilerBinding = keyResolver.getCompilerBinding();
@@ -1248,6 +1498,7 @@ class CompilationUnitResolver extends Compiler {
 	/*
 	 * Internal API used to resolve a given compilation unit. Can run a subset of the compilation process
 	 */
+	@Override
 	public CompilationUnitDeclaration resolve(
 			org.eclipse.jdt.internal.compiler.env.ICompilationUnit sourceUnit,
 			boolean verifyMethods,
@@ -1279,6 +1530,7 @@ class CompilationUnitResolver extends Compiler {
 	/*
 	 * Internal API used to resolve a given compilation unit. Can run a subset of the compilation process
 	 */
+	@Override
 	public CompilationUnitDeclaration resolve(
 			CompilationUnitDeclaration unit,
 			org.eclipse.jdt.internal.compiler.env.ICompilationUnit sourceUnit,
