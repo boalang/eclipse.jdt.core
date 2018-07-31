@@ -1424,16 +1424,18 @@ class ASTConverter {
 			}
 			return compilationUnit;
 		} catch(IllegalArgumentException e) {
-			StringBuffer message = new StringBuffer("Exception occurred during compilation unit conversion:");  //$NON-NLS-1$
-			String lineDelimiter = Util.findLineSeparator(source);
-			if (lineDelimiter == null) lineDelimiter = System.getProperty("line.separator");//$NON-NLS-1$
-			message.append(lineDelimiter);
-			message.append("----------------------------------- SOURCE BEGIN -------------------------------------"); //$NON-NLS-1$
-			message.append(lineDelimiter);
-			message.append(source);
-			message.append(lineDelimiter);
-			message.append("----------------------------------- SOURCE END -------------------------------------"); //$NON-NLS-1$
-			Util.log(e, message.toString());
+			if (SourceRangeVerifier.DEBUG) {
+				StringBuffer message = new StringBuffer("Exception occurred during compilation unit conversion:");  //$NON-NLS-1$
+				String lineDelimiter = Util.findLineSeparator(source);
+				if (lineDelimiter == null) lineDelimiter = System.getProperty("line.separator");//$NON-NLS-1$
+				message.append(lineDelimiter);
+				message.append("----------------------------------- SOURCE BEGIN -------------------------------------"); //$NON-NLS-1$
+				message.append(lineDelimiter);
+				message.append(source);
+				message.append(lineDelimiter);
+				message.append("----------------------------------- SOURCE END -------------------------------------"); //$NON-NLS-1$
+				Util.log(e, message.toString());
+			}
 			throw e;
 		}
 	}
